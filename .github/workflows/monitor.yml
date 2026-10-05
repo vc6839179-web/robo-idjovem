@@ -1,0 +1,48 @@
+name: Monitor ID Jovem
+
+on:
+  schedule:
+    - cron: "0 */3 * * *"   # de 3 em 3 horas (horário UTC)
+  workflow_dispatch:
+    inputs:
+      modo:
+        description: "normal, teste (só manda WhatsApp) ou debug (salva prints)"
+        default: "normal"
+
+permissions:
+  contents: write
+
+jobs:
+  rodar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: |
+          pip install -r requirements.txt
+          playwright install --with-deps chromium
+      - name: Rodar robô
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          CALLMEBOT_PHONE: ${{ secrets.CALLMEBOT_PHONE }}
+          CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
+          PASSAGEIROS: ${{ vars.PASSAGEIROS }}
+          TESTE: ${{ github.event.inputs.modo == 'teste' && '1' || '0' }}
+          DEBUG: ${{ github.event.inputs.modo == 'debug' && '1' || '0' }}
+        run: python monitor.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: debug
+          path: debug/
+          if-no-files-found: ignore
+      - name: Salvar estado (evita avisos repetidos)
+        run: |
+          git config user.name "robo"
+          git config user.email "robo@users.noreply.github.com"
+          git add estado.json
+          git diff --cached --quiet || (git commit -m "estado" && git push)
+
