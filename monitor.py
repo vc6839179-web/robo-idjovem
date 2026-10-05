@@ -22,16 +22,34 @@ TESTE = os.getenv("TESTE") == "1"
 ESTADO = "estado.json"
 
 
+def destinos_whatsapp():
+    """Lê CALLMEBOT_DESTINOS ("telefone:chave,telefone:chave") ou o par antigo."""
+    lista = []
+    for item in os.getenv("CALLMEBOT_DESTINOS", "").split(","):
+        if ":" in item:
+            tel, chave = item.strip().split(":", 1)
+            lista.append((tel.strip(), chave.strip()))
+    tel, chave = os.getenv("CALLMEBOT_PHONE", "").strip(), os.getenv("CALLMEBOT_APIKEY", "").strip()
+    if tel and chave and (tel, chave) not in lista:
+        lista.append((tel, chave))
+    return lista
+
+
 def whatsapp(texto):
-    if not (os.getenv("CALLMEBOT_PHONE") and os.getenv("CALLMEBOT_APIKEY")):
+    lista = destinos_whatsapp()
+    if not lista:
         print("WhatsApp ainda não configurado. Mensagem seria:\n" + texto)
         return False
-    r = requests.get("https://api.callmebot.com/whatsapp.php", timeout=30, params={
-        "phone": os.environ["CALLMEBOT_PHONE"],
-        "apikey": os.environ["CALLMEBOT_APIKEY"],
-        "text": texto})
-    print("WhatsApp:", r.status_code, r.text[:120])
-    return r.status_code == 200
+    algum = False
+    for tel, chave in lista:
+        try:
+            r = requests.get("https://api.callmebot.com/whatsapp.php", timeout=30,
+                             params={"phone": tel, "apikey": chave, "text": texto})
+            print("WhatsApp", tel[-4:], r.status_code, r.text[:80])
+            algum = algum or r.status_code == 200
+        except Exception as e:
+            print("WhatsApp erro", tel[-4:], e)
+    return algum
 
 
 def ntfy(titulo, texto, link=None):
@@ -120,3 +138,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
