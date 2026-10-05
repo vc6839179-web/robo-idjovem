@@ -45,12 +45,11 @@ def whatsapp(texto):
         try:
             r = requests.get("https://api.callmebot.com/whatsapp.php", timeout=30,
                              params={"phone": tel, "apikey": chave, "text": texto})
-                        print("WhatsApp", tel[-4:], r.status_code, re.sub(r"<[^>]+>", " ", r.text)[:400])
+            print("WhatsApp", tel[-4:], r.status_code, re.sub(r"<[^>]+>", " ", r.text)[:400])
             algum = algum or r.status_code in (200, 203)
         except Exception as e:
             print("WhatsApp erro", tel[-4:], e)
     return algum
-
 
 def ntfy(titulo, texto, link=None):
     topico = os.getenv("NTFY_TOPIC", "").strip()
