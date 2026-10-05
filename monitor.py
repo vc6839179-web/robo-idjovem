@@ -1,4 +1,4 @@
-"""Monitor de passagens ID Jovem - Viaje Guanabara -> aviso no WhatsApp (CallMeBot)."""
+"""Monitor de passagens ID Jovem - Viaje Guanabara -> aviso no ntfy e WhatsApp (CallMeBot)."""
 import os, re, json, datetime as dt
 import requests
 from playwright.sync_api import sync_playwright
@@ -10,6 +10,11 @@ CIDADES = {
     "Fortaleza": "fortaleza-ce",
     "Juazeiro do Norte": "juazeiro_do_norte-ce",
 }
+SIGLAS = {"João Pessoa": "JP", "Campina Grande": "CG",
+          "Fortaleza": "FOR", "Juazeiro do Norte": "JDN"}
+MESES = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho",
+         "agosto", "setembro", "outubro", "novembro", "dezembro"]
+
 IDA = [("João Pessoa", "Fortaleza"), ("Campina Grande", "Fortaleza"),
        ("Campina Grande", "Juazeiro do Norte")]
 ROTAS = IDA + [(d, o) for o, d in IDA]  # ida e volta de cada rota
@@ -20,6 +25,7 @@ PALAVRA = re.compile(os.getenv("PALAVRA", r"id jovem"), re.I)
 DEBUG = os.getenv("DEBUG") == "1"
 TESTE = os.getenv("TESTE") == "1"
 ESTADO = "estado.json"
+MAX_LINHAS = 20
 
 
 def destinos_whatsapp():
@@ -45,11 +51,14 @@ def whatsapp(texto):
         try:
             r = requests.get("https://api.callmebot.com/whatsapp.php", timeout=30,
                              params={"phone": tel, "apikey": chave, "text": texto})
-            print("WhatsApp", tel[-4:], r.status_code, re.sub(r"<[^>]+>", " ", r.text)[:400])
-            algum = algum or r.status_code in (200, 203)
+            resposta = re.sub(r"<[^>]+>", " ", r.text)
+            print("WhatsApp", tel[-4:], r.status_code, resposta[:400])
+            ok = r.status_code in (200, 203) and "invalid" not in resposta.lower()
+            algum = algum or ok
         except Exception as e:
             print("WhatsApp erro", tel[-4:], e)
     return algum
+
 
 def ntfy(titulo, texto, link=None):
     topico = os.getenv("NTFY_TOPIC", "").strip()
@@ -81,6 +90,12 @@ def url(o, d, data):
             f"&passengers={PASSAGEIROS}")
 
 
+def linha_aviso(o, d, data):
+    ano, mes, dia = data.split("-")
+    return (f"Passagem disponível com ID Jovem no dia {dia} de "
+            f"{MESES[int(mes) - 1]} na rota {SIGLAS[o]} → {SIGLAS[d]}")
+
+
 def main():
     if TESTE:
         avisar("✅ Teste do robô ID Jovem", "Se você recebeu isto, o aviso está funcionando!")
@@ -94,6 +109,7 @@ def main():
         antigo = set()
     achados, hoje = {}, dt.date.today()
     os.makedirs("debug", exist_ok=True)
+    resumo = []  # só usado no debug
 
     with sync_playwright() as p:
         nav = p.chromium.launch()
@@ -108,25 +124,37 @@ def main():
                     texto = page.inner_text("body")
                 except Exception as e:
                     print("Erro", o, d, data, e)
+                    resumo.append(f"{SIGLAS[o]}>{SIGLAS[d]} {data}: ERRO")
                     continue
-                if DEBUG and i < 3:  # guarda amostras para calibrar
+                if DEBUG and i < 3:  # guarda amostras (hoje, amanhã e depois) para calibrar
                     nome = f"debug/{o}-{d}-{data}".replace(" ", "_")
                     open(nome + ".txt", "w").write(texto)
                     page.screenshot(path=nome + ".png", full_page=True)
-                if PALAVRA.search(texto):
+                m = PALAVRA.search(texto)
+                if m:
                     achados[f"{o}>{d}>{data}"] = u
                     print("ACHEI:", o, d, data)
+                    if DEBUG:
+                        trecho = texto[max(0, m.start() - 80):m.end() + 80].replace("\n", " | ")
+                        print("   trecho:", trecho)
+                if DEBUG:
+                    resumo.append(f"{SIGLAS[o]}>{SIGLAS[d]} {data}: "
+                                  f"{'ACHEI' if m else 'nada'} ({len(texto)} caracteres)")
         nav.close()
+
+    if DEBUG:
+        print("\n===== RESUMO DO DEBUG =====")
+        print("\n".join(resumo))
+        print("===========================\n")
 
     novos = {k: v for k, v in achados.items() if k not in antigo}
     if novos:
         linhas = []
-        for k, v in list(novos.items())[:12]:
+        for k in list(novos)[:MAX_LINHAS]:
             o, d, data = k.split(">")
-            ano, mes, dia = data.split("-")
-            linhas.append(f"• {o} → {d} em {dia}/{mes}\n{v}")
-        extra = f"\n(+{len(novos) - 12} outras datas)" if len(novos) > 12 else ""
-        enviou = avisar("🚌 ID JOVEM DISPONÍVEL!", "\n\n".join(linhas) + extra,
+            linhas.append("• " + linha_aviso(o, d, data))
+        extra = f"\n(+{len(novos) - MAX_LINHAS} outras datas)" if len(novos) > MAX_LINHAS else ""
+        enviou = avisar("🚌 ID JOVEM DISPONÍVEL!", "\n".join(linhas) + extra,
                         link=list(novos.values())[0])
         if not enviou:
             return  # não grava o estado: avisa na próxima rodada
@@ -137,4 +165,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
