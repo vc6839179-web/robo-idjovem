@@ -27,6 +27,7 @@ jobs:
       - name: Rodar robô
         env:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          CALLMEBOT_DESTINOS: ${{ secrets.CALLMEBOT_DESTINOS }}
           CALLMEBOT_PHONE: ${{ secrets.CALLMEBOT_PHONE }}
           CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
           PASSAGEIROS: ${{ vars.PASSAGEIROS }}
