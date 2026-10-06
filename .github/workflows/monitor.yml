@@ -2,7 +2,7 @@ name: Monitor ID Jovem
 
 on:
   schedule:
-    - cron: "0 3,11,19 * * *"
+     - cron: "0 */3 * * *"
   workflow_dispatch:
     inputs:
       modo:
@@ -33,6 +33,7 @@ jobs:
           PASSAGEIROS: ${{ vars.PASSAGEIROS }}
           DIAS: ${{ github.event.inputs.modo == 'debug' && '5' || vars.DIAS || '60' }}
           TESTE: ${{ github.event.inputs.modo == 'teste' && '1' || '0' }}
+          RESUMO: ${{ github.event.inputs.modo == 'resumo' && '1' || '0' }}
           DEBUG: ${{ github.event.inputs.modo == 'debug' && '1' || '0' }}
           PYTHONUNBUFFERED: "1"
         run: python monitor.py
