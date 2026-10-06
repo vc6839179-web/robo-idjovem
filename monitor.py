@@ -164,7 +164,6 @@ def main():
                 data = dia.isoformat()
                 u = url(o, d, data)
                 paginas += 1
-                t_pag = time.time()
                 try:
                     page.goto(u, wait_until="domcontentloaded", timeout=45000)
                     try:
@@ -174,10 +173,9 @@ def main():
                     page.wait_for_timeout(1500)
                     texto = page.inner_text("body")
                 except Exception as e:
-                    print(f"[{paginas}] ERRO {SIGLAS[o]}>{SIGLAS[d]} {data} ({time.time() - t_pag:.1f}s): {str(e)[:150]}", flush=True)
+                    print("Erro", o, d, data, e)
                     resumo.append(f"{SIGLAS[o]}>{SIGLAS[d]} {data}: ERRO ({str(e)[:120]})")
                     continue
-                print(f"[{paginas}] {SIGLAS[o]}>{SIGLAS[d]} {data} ({time.time() - t_pag:.1f}s)", flush=True)
                 if DEBUG and i < 3:  # guarda amostras (hoje, amanhã e depois) para calibrar
                     nome = f"debug/{o}-{d}-{data}".replace(" ", "_")
                     open(nome + ".txt", "w").write(texto)
