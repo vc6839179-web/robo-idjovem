@@ -26,7 +26,7 @@ TESTE = os.getenv("TESTE") == "1"
 ESTADO = "estado.json"
 
 # Dias da semana que interessam (segunda=0, terça=1, quarta=2, quinta=3, sexta=4, sábado=5, domingo=6)
-DIAS_IDA = {2, 3, 4, 5}    # ida (saindo de JP ou CG): quarta, quinta, sexta e sábado
+DIAS_IDA = {3, 4, 5}    # ida (saindo de JP ou CG):  quinta, sexta e sábado
 DIAS_VOLTA = {6, 0}        # volta (saindo de FOR ou JDN): domingo e segunda
 
 # O texto "ID Jovem" NÃO aparece na página. Com "1 jovem" na busca, a passagem vem com a
@@ -257,7 +257,7 @@ def main():
         if not chaves:
             continue
         texto = montar(novos, tipo) + "\n\n" + LEGENDA
-        if avisar(titulo, texto, link=novos[chaves[0]], prioridade=prio):
+        if avisar(titulo, texto, link=None, prioridade=prio):
             enviados.update(chaves)
     if not novos:
         print("Nada novo.")
