@@ -26,6 +26,10 @@ TESTE = os.getenv("TESTE") == "1"
 ESTADO = "estado.json"
 MAX_LINHAS = 20
 
+# Dias da semana que interessam (segunda=0, terça=1, quarta=2, quinta=3, sexta=4, sábado=5, domingo=6)
+DIAS_IDA = {2, 3, 4, 5}    # ida (saindo de JP ou CG): quarta, quinta, sexta e sábado
+DIAS_VOLTA = {6, 0}        # volta (saindo de FOR ou JDN): domingo e segunda
+
 # O texto "ID Jovem" NÃO aparece na página. Com "1 jovem" na busca, a passagem vem com a
 # etiqueta "Desconto", o preço cheio e, em seguida, o preço com ~50% de desconto.
 # Ex. no texto da página: "R$ 187.99" ... "R$\n98\n,00"
@@ -153,9 +157,14 @@ def main():
                    if r.request.resource_type in ("image", "media", "font") else r.continue_())
         for o, d in ROTAS:
             for i in range(DIAS):
-                data = (hoje + dt.timedelta(days=i)).isoformat()
+                dia = hoje + dt.timedelta(days=i)
+                # no debug olha todos os dias (para testar as 6 rotas); no normal só os dias que interessam
+                if not DEBUG and dia.weekday() not in (DIAS_IDA if (o, d) in IDA else DIAS_VOLTA):
+                    continue
+                data = dia.isoformat()
                 u = url(o, d, data)
                 paginas += 1
+                t_pag = time.time()
                 try:
                     page.goto(u, wait_until="domcontentloaded", timeout=45000)
                     try:
@@ -165,9 +174,10 @@ def main():
                     page.wait_for_timeout(1500)
                     texto = page.inner_text("body")
                 except Exception as e:
-                    print("Erro", o, d, data, e)
+                    print(f"[{paginas}] ERRO {SIGLAS[o]}>{SIGLAS[d]} {data} ({time.time() - t_pag:.1f}s): {str(e)[:150]}", flush=True)
                     resumo.append(f"{SIGLAS[o]}>{SIGLAS[d]} {data}: ERRO ({str(e)[:120]})")
                     continue
+                print(f"[{paginas}] {SIGLAS[o]}>{SIGLAS[d]} {data} ({time.time() - t_pag:.1f}s)", flush=True)
                 if DEBUG and i < 3:  # guarda amostras (hoje, amanhã e depois) para calibrar
                     nome = f"debug/{o}-{d}-{data}".replace(" ", "_")
                     open(nome + ".txt", "w").write(texto)
