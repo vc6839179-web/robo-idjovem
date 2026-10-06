@@ -2,12 +2,12 @@ name: Monitor ID Jovem
 
 on:
   schedule:
-    - cron: "0 */3 * * *"   # de 3 em 3 horas (horário UTC)
+    - cron: "0 3,11,19 * * *"
   workflow_dispatch:
     inputs:
       modo:
         description: "normal, teste (só manda WhatsApp) ou debug (salva prints, só 5 dias)"
-        default: "normal"
+        default: "normal
 
 permissions:
   contents: write
