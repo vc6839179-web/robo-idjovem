@@ -12,8 +12,8 @@ CIDADES = {
 }
 SIGLAS = {"João Pessoa": "JP", "Campina Grande": "CG",
           "Fortaleza": "FOR", "Juazeiro do Norte": "JDN"}
-MESES = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho",
-         "agosto", "setembro", "outubro", "novembro", "dezembro"]
+LEGENDA = "JP = João Pessoa · CG = Campina Grande · FOR = Fortaleza · JDN = Juazeiro do Norte"
+SEMANA = ["seg", "ter", "qua", "qui", "sex", "sáb", "dom"]
 
 IDA = [("João Pessoa", "Fortaleza"), ("Campina Grande", "Fortaleza"),
        ("Campina Grande", "Juazeiro do Norte")]
@@ -24,7 +24,6 @@ PASSAGEIROS = os.getenv("PASSAGEIROS", "").strip()   # ex.: 3:1  (código do Jov
 DEBUG = os.getenv("DEBUG") == "1"
 TESTE = os.getenv("TESTE") == "1"
 ESTADO = "estado.json"
-MAX_LINHAS = 20
 
 # Dias da semana que interessam (segunda=0, terça=1, quarta=2, quinta=3, sexta=4, sábado=5, domingo=6)
 DIAS_IDA = {2, 3, 4, 5}    # ida (saindo de JP ou CG): quarta, quinta, sexta e sábado
@@ -61,6 +60,26 @@ def id_jovem(texto):
     return tipos
 
 
+def partir(texto, limite):
+    """Divide o texto em partes de até `limite` caracteres, sempre quebrando entre linhas."""
+    partes, atual = [], ""
+    for linha in texto.split("\n"):
+        while len(linha) > limite:  # linha gigante: corta (não deve acontecer)
+            if atual:
+                partes.append(atual)
+                atual = ""
+            partes.append(linha[:limite])
+            linha = linha[limite:]
+        if atual and len(atual) + 1 + len(linha) > limite:
+            partes.append(atual)
+            atual = linha
+        else:
+            atual = f"{atual}\n{linha}" if atual else linha
+    if atual:
+        partes.append(atual)
+    return partes
+
+
 def destinos_whatsapp():
     """Lê CALLMEBOT_DESTINOS ("telefone:chave,telefone:chave") ou o par antigo."""
     lista = []
@@ -79,44 +98,54 @@ def whatsapp(texto):
     if not lista:
         print("WhatsApp ainda não configurado. Mensagem seria:\n" + texto)
         return False
+    partes = partir(texto, 1000)  # mensagens longas vão em várias partes, na ordem
     algum = False
     for tel, chave in lista:
-        try:
-            r = requests.get("https://api.callmebot.com/whatsapp.php", timeout=30,
-                             params={"phone": tel, "apikey": chave, "text": texto})
-            resposta = re.sub(r"<[^>]+>", " ", r.text)
-            # esconde telefone e chave: os logs de repositório público são visíveis a todos
-            resposta = resposta.replace(tel, "***").replace(tel.lstrip("+"), "***")
-            resposta = resposta.replace(chave, "***")
-            print("WhatsApp", "***", r.status_code, resposta[:400])
-            ok = r.status_code in (200, 203) and "invalid" not in resposta.lower()
-            algum = algum or ok
-        except Exception as e:
-            print("WhatsApp erro", "***", str(e).replace(chave, "***"))
+        for n, parte in enumerate(partes, 1):
+            if len(partes) > 1:
+                parte = f"({n}/{len(partes)})\n{parte}"
+            try:
+                r = requests.get("https://api.callmebot.com/whatsapp.php", timeout=30,
+                                 params={"phone": tel, "apikey": chave, "text": parte})
+                resposta = re.sub(r"<[^>]+>", " ", r.text)
+                # esconde telefone e chave: os logs de repositório público são visíveis a todos
+                resposta = resposta.replace(tel, "***").replace(tel.lstrip("+"), "***")
+                resposta = resposta.replace(chave, "***")
+                print("WhatsApp", "***", f"parte {n}/{len(partes)}", r.status_code, resposta[:200])
+                ok = r.status_code in (200, 203) and "invalid" not in resposta.lower()
+                algum = algum or ok
+            except Exception as e:
+                print("WhatsApp erro", "***", str(e).replace(chave, "***"))
+            if n < len(partes):
+                time.sleep(3)  # dá tempo de uma parte chegar antes da outra
     return algum
 
 
-def ntfy(titulo, texto, link=None):
+def ntfy(titulo, texto, link=None, prioridade=5):
     topico = os.getenv("NTFY_TOPIC", "").strip()
     if not topico:
         print("ntfy ainda não configurado.")
         return False
-    corpo = {"topic": topico, "title": titulo, "message": texto,
-             "priority": 5, "tags": ["bus"]}
-    if link:
-        corpo["click"] = link
-    try:
-        r = requests.post("https://ntfy.sh", json=corpo, timeout=30)
-        print("ntfy:", r.status_code, r.text[:120])
-        return r.status_code == 200
-    except Exception as e:
-        print("ntfy erro:", e)
-        return False
+    partes = partir(texto, 3500)  # o ntfy aceita ~4 mil caracteres por mensagem
+    algum = False
+    for n, parte in enumerate(partes, 1):
+        t = titulo if len(partes) == 1 else f"{titulo} ({n}/{len(partes)})"
+        corpo = {"topic": topico, "title": t, "message": parte,
+                 "priority": prioridade, "tags": ["bus"]}
+        if link:
+            corpo["click"] = link
+        try:
+            r = requests.post("https://ntfy.sh", json=corpo, timeout=30)
+            print("ntfy:", r.status_code, r.text[:120])
+            algum = algum or r.status_code == 200
+        except Exception as e:
+            print("ntfy erro:", e)
+    return algum
 
 
-def avisar(titulo, texto, link=None):
+def avisar(titulo, texto, link=None, prioridade=5):
     """Manda por ntfy e WhatsApp; vale se pelo menos um funcionar."""
-    a = ntfy(titulo, texto, link)
+    a = ntfy(titulo, texto, link, prioridade)
     b = whatsapp(f"{titulo}\n\n{texto}")
     return a or b
 
@@ -126,11 +155,26 @@ def url(o, d, data):
             f"&passengers={PASSAGEIROS}")
 
 
-def linha_aviso(o, d, data, tipo):
-    ano, mes, dia = data.split("-")
-    desc = "100% grátis" if tipo == "100" else "50% de desconto"
-    return (f"Passagem disponível com ID Jovem ({desc}) no dia {dia} de "
-            f"{MESES[int(mes) - 1]} na rota {SIGLAS[o]} → {SIGLAS[d]}")
+def rotulo_data(data):
+    d = dt.date.fromisoformat(data)
+    return f"{SEMANA[d.weekday()]} {d.day:02d}/{d.month:02d}"
+
+
+def montar(novos, tipo):
+    """Texto com as datas novas de um tipo ('100' ou '50'): uma linha por rota,
+    indicando ida ou volta e o dia da semana de cada data."""
+    grupos = {}
+    for k in novos:
+        o, d, data, t = k.split(">")
+        if t == tipo:
+            grupos.setdefault((o, d), []).append(data)
+    linhas = []
+    for o, d in ROTAS:
+        if (o, d) in grupos:
+            sentido = "IDA" if (o, d) in IDA else "VOLTA"
+            datas = ", ".join(rotulo_data(x) for x in sorted(grupos[(o, d)]))
+            linhas.append(f"{sentido} {SIGLAS[o]} → {SIGLAS[d]}: {datas}")
+    return "\n".join(linhas)
 
 
 def main():
@@ -204,21 +248,21 @@ def main():
         print("===========================\n")
 
     novos = {k: v for k, v in achados.items() if k not in antigo}
-    if novos:
-        linhas = []
-        ordem = sorted(novos, key=lambda k: (k.split(">")[2], k))  # por data
-        for k in ordem[:MAX_LINHAS]:
-            o, d, data, tipo = k.split(">")
-            linhas.append("• " + linha_aviso(o, d, data, tipo))
-        extra = f"\n(+{len(novos) - MAX_LINHAS} outras)" if len(novos) > MAX_LINHAS else ""
-        titulo = ("🎉 ID JOVEM 100% GRÁTIS DISPONÍVEL!" if any(k.endswith(">100") for k in novos)
-                  else "🚌 ID JOVEM DISPONÍVEL!")
-        enviou = avisar(titulo, "\n".join(linhas) + extra, link=novos[ordem[0]])
-        if not enviou:
-            return  # não grava o estado: avisa na próxima rodada
-    else:
+    enviados = set()
+    # 100% primeiro (aviso forte); depois os 50% (aviso normal)
+    for tipo, titulo, prio in (("100", "🎉 ID JOVEM 100% GRÁTIS", 5),
+                               ("50", "🚌 ID Jovem 50% de desconto", 3)):
+        chaves = sorted((k for k in novos if k.endswith(">" + tipo)),
+                        key=lambda k: (k.split(">")[2], k))
+        if not chaves:
+            continue
+        texto = montar(novos, tipo) + "\n\n" + LEGENDA
+        if avisar(titulo, texto, link=novos[chaves[0]], prioridade=prio):
+            enviados.update(chaves)
+    if not novos:
         print("Nada novo.")
-    json.dump(sorted(achados), open(ESTADO, "w"))
+    # guarda o que já foi avisado; o que falhou no envio fica de fora e é avisado na próxima rodada
+    json.dump(sorted(k for k in achados if k in antigo or k in enviados), open(ESTADO, "w"))
 
 
 if __name__ == "__main__":
