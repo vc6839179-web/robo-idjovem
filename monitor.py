@@ -1,5 +1,5 @@
 """Monitor de passagens ID Jovem - Viaje Guanabara -> aviso no ntfy e WhatsApp (CallMeBot)."""
-import os, re, json, datetime as dt
+import os, re, json, time, datetime as dt
 import requests
 from playwright.sync_api import sync_playwright
 
@@ -21,11 +21,40 @@ ROTAS = IDA + [(d, o) for o, d in IDA]  # ida e volta de cada rota
 
 DIAS = int(os.getenv("DIAS", "60"))                  # quantos dias à frente pesquisar
 PASSAGEIROS = os.getenv("PASSAGEIROS", "").strip()   # ex.: 3:1  (código do Jovem)
-PALAVRA = re.compile(os.getenv("PALAVRA", r"id jovem"), re.I)
 DEBUG = os.getenv("DEBUG") == "1"
 TESTE = os.getenv("TESTE") == "1"
 ESTADO = "estado.json"
 MAX_LINHAS = 20
+
+# O texto "ID Jovem" NÃO aparece na página. Com "1 jovem" na busca, a passagem vem com a
+# etiqueta "Desconto", o preço cheio e, em seguida, o preço com ~50% de desconto.
+# Ex. no texto da página: "R$ 187.99" ... "R$\n98\n,00"
+PRECOS = re.compile(r"R\$\s*(\d+\.\d{2})\s+R\$\s*(\d+)\s*,\s*(\d{2})")
+
+
+def brl(v):
+    return f"{v:.2f}".replace(".", ",")
+
+
+GRATIS_ATE = 12.0  # ID Jovem 100% (gratuita) só paga a taxa: preço final abaixo de R$ 12
+
+
+def id_jovem(texto):
+    """Devolve {"100": menor_preço, "50": menor_preço} com os tipos de ID Jovem da página.
+    "nenhum resultado encontrado" = sem passagem (ou vagas esgotadas) -> {}."""
+    if re.search(r"nenhum resultado", texto, re.I):
+        return {}
+    tipos = {}
+    for a, b, c in PRECOS.findall(texto):
+        cheio, final = float(a), float(f"{b}.{c}")
+        if final < GRATIS_ATE:
+            tipo = "100"
+        elif final <= cheio * 0.6:
+            tipo = "50"
+        else:
+            continue
+        tipos[tipo] = min(final, tipos.get(tipo, final))
+    return tipos
 
 
 def destinos_whatsapp():
@@ -52,11 +81,14 @@ def whatsapp(texto):
             r = requests.get("https://api.callmebot.com/whatsapp.php", timeout=30,
                              params={"phone": tel, "apikey": chave, "text": texto})
             resposta = re.sub(r"<[^>]+>", " ", r.text)
-            print("WhatsApp", tel[-4:], r.status_code, resposta[:400])
+            # esconde telefone e chave: os logs de repositório público são visíveis a todos
+            resposta = resposta.replace(tel, "***").replace(tel.lstrip("+"), "***")
+            resposta = resposta.replace(chave, "***")
+            print("WhatsApp", "***", r.status_code, resposta[:400])
             ok = r.status_code in (200, 203) and "invalid" not in resposta.lower()
             algum = algum or ok
         except Exception as e:
-            print("WhatsApp erro", tel[-4:], e)
+            print("WhatsApp erro", "***", str(e).replace(chave, "***"))
     return algum
 
 
@@ -90,9 +122,10 @@ def url(o, d, data):
             f"&passengers={PASSAGEIROS}")
 
 
-def linha_aviso(o, d, data):
+def linha_aviso(o, d, data, tipo):
     ano, mes, dia = data.split("-")
-    return (f"Passagem disponível com ID Jovem no dia {dia} de "
+    desc = "100% grátis" if tipo == "100" else "50% de desconto"
+    return (f"Passagem disponível com ID Jovem ({desc}) no dia {dia} de "
             f"{MESES[int(mes) - 1]} na rota {SIGLAS[o]} → {SIGLAS[d]}")
 
 
@@ -110,37 +143,52 @@ def main():
     achados, hoje = {}, dt.date.today()
     os.makedirs("debug", exist_ok=True)
     resumo = []  # só usado no debug
+    inicio, paginas = time.time(), 0
 
     with sync_playwright() as p:
         nav = p.chromium.launch()
         page = nav.new_context(locale="pt-BR", viewport={"width": 1280, "height": 900}).new_page()
+        # não baixa imagens, vídeos e fontes: só o texto importa e a página carrega bem mais rápido
+        page.route("**/*", lambda r: r.abort()
+                   if r.request.resource_type in ("image", "media", "font") else r.continue_())
         for o, d in ROTAS:
             for i in range(DIAS):
                 data = (hoje + dt.timedelta(days=i)).isoformat()
                 u = url(o, d, data)
+                paginas += 1
                 try:
-                    page.goto(u, wait_until="networkidle", timeout=60000)
-                    page.wait_for_timeout(2500)
+                    page.goto(u, wait_until="domcontentloaded", timeout=45000)
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=8000)
+                    except Exception:
+                        pass  # seguiu carregando: lê o que já está na tela
+                    page.wait_for_timeout(1500)
                     texto = page.inner_text("body")
                 except Exception as e:
                     print("Erro", o, d, data, e)
-                    resumo.append(f"{SIGLAS[o]}>{SIGLAS[d]} {data}: ERRO")
+                    resumo.append(f"{SIGLAS[o]}>{SIGLAS[d]} {data}: ERRO ({str(e)[:120]})")
                     continue
                 if DEBUG and i < 3:  # guarda amostras (hoje, amanhã e depois) para calibrar
                     nome = f"debug/{o}-{d}-{data}".replace(" ", "_")
                     open(nome + ".txt", "w").write(texto)
                     page.screenshot(path=nome + ".png", full_page=True)
-                m = PALAVRA.search(texto)
-                if m:
-                    achados[f"{o}>{d}>{data}"] = u
-                    print("ACHEI:", o, d, data)
-                    if DEBUG:
-                        trecho = texto[max(0, m.start() - 80):m.end() + 80].replace("\n", " | ")
-                        print("   trecho:", trecho)
+                tipos = id_jovem(texto)
+                for tipo, preco in tipos.items():
+                    achados[f"{o}>{d}>{data}>{tipo}"] = u
+                    print(f"ACHEI: {o} > {d} {data} ID Jovem {tipo}% a partir de R$ {brl(preco)}")
                 if DEBUG:
-                    resumo.append(f"{SIGLAS[o]}>{SIGLAS[d]} {data}: "
-                                  f"{'ACHEI' if m else 'nada'} ({len(texto)} caracteres)")
+                    rota = f"{SIGLAS[o]}>{SIGLAS[d]} {data}: "
+                    if tipos:
+                        det = ", ".join(f"{t}% a partir de R$ {brl(p)}"
+                                        for t, p in sorted(tipos.items(), key=lambda x: -int(x[0])))
+                        resumo.append(rota + f"ACHEI ({det})")
+                    elif re.search(r"nenhum resultado", texto, re.I):
+                        resumo.append(rota + "nada (nenhum resultado encontrado)")
+                    else:
+                        resumo.append(rota + "TEM VIAGENS, mas sem preço de ID Jovem reconhecido")
         nav.close()
+    seg = time.time() - inicio
+    print(f"Tempo: {seg:.0f}s para {paginas} páginas ({seg / max(paginas, 1):.1f}s por página)")
 
     if DEBUG:
         print("\n===== RESUMO DO DEBUG =====")
@@ -150,12 +198,14 @@ def main():
     novos = {k: v for k, v in achados.items() if k not in antigo}
     if novos:
         linhas = []
-        for k in list(novos)[:MAX_LINHAS]:
-            o, d, data = k.split(">")
-            linhas.append("• " + linha_aviso(o, d, data))
-        extra = f"\n(+{len(novos) - MAX_LINHAS} outras datas)" if len(novos) > MAX_LINHAS else ""
-        enviou = avisar("🚌 ID JOVEM DISPONÍVEL!", "\n".join(linhas) + extra,
-                        link=list(novos.values())[0])
+        ordem = sorted(novos, key=lambda k: (k.split(">")[2], k))  # por data
+        for k in ordem[:MAX_LINHAS]:
+            o, d, data, tipo = k.split(">")
+            linhas.append("• " + linha_aviso(o, d, data, tipo))
+        extra = f"\n(+{len(novos) - MAX_LINHAS} outras)" if len(novos) > MAX_LINHAS else ""
+        titulo = ("🎉 ID JOVEM 100% GRÁTIS DISPONÍVEL!" if any(k.endswith(">100") for k in novos)
+                  else "🚌 ID JOVEM DISPONÍVEL!")
+        enviou = avisar(titulo, "\n".join(linhas) + extra, link=novos[ordem[0]])
         if not enviou:
             return  # não grava o estado: avisa na próxima rodada
     else:
