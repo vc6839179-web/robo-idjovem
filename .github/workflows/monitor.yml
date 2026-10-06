@@ -7,7 +7,7 @@ on:
     inputs:
       modo:
         description: "normal, teste (só manda WhatsApp) ou debug (salva prints, só 5 dias)"
-        default: "normal
+        default: "normal"
 
 permissions:
   contents: write
