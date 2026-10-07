@@ -12,7 +12,6 @@ CIDADES = {
 }
 SIGLAS = {"João Pessoa": "JP", "Campina Grande": "CG",
           "Fortaleza": "FOR", "Juazeiro do Norte": "JDN"}
-LEGENDA = "JP = João Pessoa · CG = Campina Grande · FOR = Fortaleza · JDN = Juazeiro do Norte"
 SEMANA = ["seg", "ter", "qua", "qui", "sex", "sáb", "dom"]
 
 IDA = [("João Pessoa", "Fortaleza"), ("Campina Grande", "Fortaleza"),
@@ -23,11 +22,11 @@ DIAS = int(os.getenv("DIAS", "60"))                  # quantos dias à frente pe
 PASSAGEIROS = os.getenv("PASSAGEIROS", "").strip()   # ex.: 3:1  (código do Jovem)
 DEBUG = os.getenv("DEBUG") == "1"
 TESTE = os.getenv("TESTE") == "1"
-RESUMO = os.getenv("RESUMO") == "1"   # manda TUDO que está disponível agora, sem mexer no histórico
+RESUMO = os.getenv("RESUMO") == "1"   # manda TUDO que está disponível agora, mesmo o que já foi avisado
 ESTADO = "estado.json"
 
 # Dias da semana que interessam (segunda=0, terça=1, quarta=2, quinta=3, sexta=4, sábado=5, domingo=6)
-DIAS_IDA = {3, 4, 5}    # ida (saindo de JP ou CG): quinta, sexta e sábado
+DIAS_IDA = {2, 3, 4, 5}    # ida (saindo de JP ou CG): quarta, quinta, sexta e sábado
 DIAS_VOLTA = {6, 0}        # volta (saindo de FOR ou JDN): domingo e segunda
 
 # O texto "ID Jovem" NÃO aparece na página. Com "1 jovem" na busca, a passagem vem com a
@@ -257,17 +256,13 @@ def main():
                         key=lambda k: (k.split(">")[2], k))
         if not chaves:
             continue
-        texto = montar(novos, tipo) + "\n\n" + LEGENDA
+        texto = montar(novos, tipo)
         if RESUMO:
-            titulo = "📋 RESUMO: " + titulo.split(" ", 1)[1]
+            titulo = "📋 RESUMO DO DIA: " + titulo.split(" ", 1)[1]
         if avisar(titulo, texto, link=None, prioridade=prio):
             enviados.update(chaves)
-    if RESUMO:
-        if not novos:
-            avisar("📋 RESUMO ID Jovem", "Nenhuma passagem ID Jovem disponível agora nas rotas e dias monitorados.")
-        return  # o resumo não altera o histórico de avisos
     if not novos:
-        print("Nada novo.")
+        print("Nada novo." if not RESUMO else "Resumo: nenhuma passagem disponível, nada enviado.")
     # guarda o que já foi avisado; o que falhou no envio fica de fora e é avisado na próxima rodada
     json.dump(sorted(k for k in achados if k in antigo or k in enviados), open(ESTADO, "w"))
 
