@@ -155,26 +155,148 @@ def url(o, d, data):
             f"&passengers={PASSAGEIROS}")
 
 
-def rotulo_data(data):
+def pascoa(ano):
+    """Data da Páscoa (algoritmo gregoriano) - base para Carnaval, Sexta Santa e Corpus Christi."""
+    a, b, c = ano % 19, ano // 100, ano % 100
+    d, e, f = b // 4, b % 4, (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = c // 4, c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    mes = (h + l - 7 * m + 114) // 31
+    dia = (h + l - 7 * m + 114) % 31 + 1
+    return dt.date(ano, mes, dia)
+
+
+def feriados(ano):
+    p, dia = pascoa(ano), dt.timedelta
+    return {
+        dt.date(ano, 1, 1): "Ano Novo",
+        p - dia(days=48): "Carnaval",
+        p - dia(days=47): "Carnaval",
+        p - dia(days=2): "Sexta-feira Santa",
+        dt.date(ano, 4, 21): "Tiradentes",
+        dt.date(ano, 5, 1): "Dia do Trabalho",
+        p + dia(days=60): "Corpus Christi",
+        dt.date(ano, 9, 7): "Independência",
+        dt.date(ano, 10, 12): "Nossa Senhora Aparecida",
+        dt.date(ano, 11, 2): "Finados",
+        dt.date(ano, 11, 15): "Proclamação da República",
+        dt.date(ano, 11, 20): "Consciência Negra",
+        dt.date(ano, 12, 25): "Natal",
+    }
+
+
+def feriadao(data):
+    """Se a data (AAAA-MM-DD) cai num feriadão, devolve (nome, data_do_feriado); senão None.
+    Feriadão = feriado em segunda, terça, quinta ou sexta (com "enforcado" nos dias de ponte).
+    Vale do 2º dia antes do início da folga até o último dia da folga."""
     d = dt.date.fromisoformat(data)
-    return f"{SEMANA[d.weekday()]} {d.day:02d}/{d.month:02d}"
+    um = dt.timedelta(days=1)
+    fer = {}
+    for ano in (d.year - 1, d.year, d.year + 1):
+        fer.update(feriados(ano))
+    for h in sorted(fer):
+        if h.weekday() not in (0, 1, 3, 4):
+            continue
+        ponte = {h - um} if h.weekday() == 1 else {h + um} if h.weekday() == 3 else set()
+
+        def folga(x):
+            return x.weekday() >= 5 or x in fer or x in ponte
+        ini = fim = h
+        while folga(ini - um):
+            ini -= um
+        while folga(fim + um):
+            fim += um
+        if ini - 2 * um <= d <= fim:
+            return fer[h], h
+    return None
+
+
+def rotulo_data(data, usados=None):
+    d = dt.date.fromisoformat(data)
+    txt = f"{SEMANA[d.weekday()]} {d.day:02d}/{d.month:02d}"
+    f = feriadao(data)
+    if f:
+        txt += " 🏖️"
+        if usados is not None:
+            usados.add(f)
+    return txt
+
+
+def rodape(usados):
+    return "\n".join(f"🏖️ Feriadão de {n} ({SEMANA[h.weekday()]} {h.day:02d}/{h.month:02d})"
+                     for n, h in sorted(usados, key=lambda x: x[1]))
 
 
 def montar(novos, tipo):
     """Texto com as datas novas de um tipo ('100' ou '50'): uma linha por rota,
-    indicando ida ou volta e o dia da semana de cada data."""
+    indicando ida ou volta e o dia da semana de cada data. 🏖️ marca feriadão."""
     grupos = {}
     for k in novos:
         o, d, data, t = k.split(">")
         if t == tipo:
             grupos.setdefault((o, d), []).append(data)
-    linhas = []
+    usados, linhas = set(), []
     for o, d in ROTAS:
         if (o, d) in grupos:
             sentido = "IDA" if (o, d) in IDA else "VOLTA"
-            datas = ", ".join(rotulo_data(x) for x in sorted(grupos[(o, d)]))
+            datas = ", ".join(rotulo_data(x, usados) for x in sorted(grupos[(o, d)]))
             linhas.append(f"{sentido} {SIGLAS[o]} → {SIGLAS[d]}: {datas}")
-    return "\n".join(linhas)
+    r = rodape(usados)
+    return "\n".join(linhas) + ("\n\n" + r if r else "")
+
+
+# (dia da semana da IDA, dias até a VOLTA): quinta (3) -> domingo, 3 dias depois.
+# Para incluir outras combinações, acrescente pares, ex.: (4, 2) = sexta -> domingo.
+COMBOS = [(3, 3)]
+
+
+def melhor(achados, o, d, data):
+    """'100' se houver passagem 100% grátis nessa rota/data; senão '50'; senão None."""
+    for t in ("100", "50"):
+        if f"{o}>{d}>{data}>{t}" in achados:
+            return t
+    return None
+
+
+def achar_pares(achados):
+    """Ida numa rota + volta na rota inversa, ambas disponíveis (100% ou 50%)."""
+    pares = {}
+    for o, d in IDA:
+        datas = {k.split(">")[2] for k in achados if k.startswith(f"{o}>{d}>")}
+        for data in sorted(datas):
+            dia = dt.date.fromisoformat(data)
+            for dia_ida, depois in COMBOS:
+                if dia.weekday() != dia_ida:
+                    continue
+                volta = (dia + dt.timedelta(days=depois)).isoformat()
+                a, b = melhor(achados, o, d, data), melhor(achados, d, o, volta)
+                if a and b:
+                    pares[f"par|{o}>{d}|{data}|{volta}|{a}+{b}"] = (o, d, data, volta, a, b)
+    return pares
+
+
+def montar_pares(pares):
+    grupos = {"100": [], "misto": [], "50": []}
+    usados = set()
+    for k, (o, d, ida, volta, a, b) in sorted(pares.items(), key=lambda kv: (kv[1][2], kv[0])):
+        linha = (f"{SIGLAS[o]} ⇄ {SIGLAS[d]}: ida {rotulo_data(ida, usados)} → "
+                 f"volta {rotulo_data(volta, usados)}")
+        if a == b:
+            grupos[a].append(linha)
+        else:
+            grupos["misto"].append(linha + f" (ida {a}% · volta {b}%)")
+    blocos = []
+    if grupos["100"]:
+        blocos.append("🏆 IDA E VOLTA 100% GRÁTIS\n" + "\n".join(grupos["100"]))
+    if grupos["misto"]:
+        blocos.append("🥇 UMA PERNA GRÁTIS + OUTRA COM 50%\n" + "\n".join(grupos["misto"]))
+    if grupos["50"]:
+        blocos.append("🥈 IDA E VOLTA COM 50%\n" + "\n".join(grupos["50"]))
+    r = rodape(usados)
+    return "\n\n".join(blocos) + ("\n\n" + r if r else "")
 
 
 def main():
@@ -249,6 +371,15 @@ def main():
 
     novos = dict(achados) if RESUMO else {k: v for k, v in achados.items() if k not in antigo}
     enviados = set()
+    # destaque: ida (quinta) + volta (domingo) disponíveis -> vai ANTES dos avisos normais, que continuam
+    pares = achar_pares(achados)
+    novos_pares = pares if RESUMO else {k: v for k, v in pares.items() if k not in antigo}
+    enviados_pares = set()
+    if novos_pares:
+        prio = 5 if any("100" in (v[4], v[5]) for v in novos_pares.values()) else 4
+        titulo = ("📋 RESUMO DO DIA: " if RESUMO else "") + "⭐ IDA E VOLTA DISPONÍVEL"
+        if avisar(titulo, montar_pares(novos_pares), link=None, prioridade=prio):
+            enviados_pares.update(novos_pares)
     # 100% primeiro (aviso forte); depois os 50% (aviso normal)
     for tipo, titulo, prio in (("100", "🎉 ID JOVEM 100% GRÁTIS", 5),
                                ("50", "🚌 ID Jovem 50% de desconto", 3)):
@@ -261,10 +392,12 @@ def main():
             titulo = "📋 RESUMO DO DIA: " + titulo.split(" ", 1)[1]
         if avisar(titulo, texto, link=None, prioridade=prio):
             enviados.update(chaves)
-    if not novos:
+    if not novos and not novos_pares:
         print("Nada novo." if not RESUMO else "Resumo: nenhuma passagem disponível, nada enviado.")
     # guarda o que já foi avisado; o que falhou no envio fica de fora e é avisado na próxima rodada
-    json.dump(sorted(k for k in achados if k in antigo or k in enviados), open(ESTADO, "w"))
+    estado = {k for k in achados if k in antigo or k in enviados}
+    estado |= {k for k in pares if k in antigo or k in enviados_pares}
+    json.dump(sorted(estado), open(ESTADO, "w"))
 
 
 if __name__ == "__main__":
