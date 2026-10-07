@@ -26,8 +26,9 @@ RESUMO = os.getenv("RESUMO") == "1"   # manda TUDO que está disponível agora, 
 ESTADO = "estado.json"
 
 # Dias da semana que interessam (segunda=0, terça=1, quarta=2, quinta=3, sexta=4, sábado=5, domingo=6)
-DIAS_IDA = {3, 4, 5}    # ida (saindo de JP ou CG): quarta, quinta, sexta e sábado
-DIAS_VOLTA = {6, 0}        # volta (saindo de FOR ou JDN): domingo e segunda
+DIAS_IDA = {3, 4, 5}    # ida (saindo de JP ou CG): quinta, sexta e sábado
+DIAS_VOLTA_AVISO = {6, 0}  # volta (saindo de FOR ou JDN) que gera aviso normal: domingo e segunda
+DIAS_VOLTA = {5, 6, 0}     # volta que o robô consulta: inclui sábado, usado só nas combinações ida+volta
 
 # O texto "ID Jovem" NÃO aparece na página. Com "1 jovem" na busca, a passagem vem com a
 # etiqueta "Desconto", o preço cheio e, em seguida, o preço com ~50% de desconto.
@@ -248,9 +249,16 @@ def montar(novos, tipo):
     return "\n".join(linhas) + ("\n\n" + r if r else "")
 
 
-# (dia da semana da IDA, dias até a VOLTA): quinta (3) -> domingo, 3 dias depois.
-# Para incluir outras combinações, acrescente pares, ex.: (4, 2) = sexta -> domingo.
-COMBOS = [(3, 3)]
+# (dia da semana da IDA, dias até a VOLTA): quinta -> domingo (3, 3), sexta -> domingo (4, 2)
+# e quinta -> sábado (3, 2). Para outras combinações, acrescente pares, ex.: (5, 1) = sábado -> domingo.
+# Obs.: a volta precisa estar em DIAS_VOLTA (acima) para ser consultada.
+COMBOS = [(3, 3), (4, 2), (3, 2)]
+
+
+def avisavel(chave):
+    """Aviso normal só para os dias de interesse (volta de sábado serve apenas às combinações)."""
+    o, d, data, _ = chave.split(">")
+    return dt.date.fromisoformat(data).weekday() in (DIAS_IDA if (o, d) in IDA else DIAS_VOLTA_AVISO)
 
 
 def melhor(achados, o, d, data):
@@ -369,7 +377,7 @@ def main():
         print("\n".join(resumo))
         print("===========================\n")
 
-    novos = dict(achados) if RESUMO else {k: v for k, v in achados.items() if k not in antigo}
+    novos = {k: v for k, v in achados.items() if avisavel(k) and (RESUMO or k not in antigo)}
     enviados = set()
     # destaque: ida (quinta) + volta (domingo) disponíveis -> vai ANTES dos avisos normais, que continuam
     pares = achar_pares(achados)
