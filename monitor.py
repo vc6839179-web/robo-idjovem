@@ -329,7 +329,7 @@ def montar_pares(pares):
     if grupos["100"]:
         blocos.append("🏆 IDA E VOLTA 100% GRÁTIS\n" + "\n".join(grupos["100"]))
     if grupos["misto"]:
-        blocos.append("🥇 UMA GRÁTIS + OUTRA COM 50%\n" + "\n".join(grupos["misto"]))
+        blocos.append("🥇 UMA PERNA GRÁTIS + OUTRA COM 50%\n" + "\n".join(grupos["misto"]))
     if grupos["50"]:
         blocos.append("🥈 IDA E VOLTA COM 50%\n" + "\n".join(grupos["50"]))
     r = rodape(usados)
@@ -338,9 +338,12 @@ def montar_pares(pares):
 
 # ---------------------------------------------------------------- Catedral (ClickBus)
 CAT_BASE = "https://catedral.clickbus.com.br/onibus"
-CAT_SLUGS = {"João Pessoa": "joao-pessoa-pb", "Fortaleza": "fortaleza-ce"}
+CAT_SLUGS = {"João Pessoa": "joao-pessoa-pb", "Fortaleza": "fortaleza-ce-todos"}  # "-todos" = todos os terminais
 CAT_ROTAS = [("João Pessoa", "Fortaleza"), ("Fortaleza", "João Pessoa")]  # a Catedral só opera esta rota
 SEM_GRATUIDADE = re.compile(r"não há gratuidades", re.I)
+# Quando a data pedida não tem viagem, o site mostra as viagens da data MAIS PRÓXIMA com esta frase.
+# Sem este filtro, o robô atribuiria a viagem de outro dia à data consultada.
+SEM_VIAGEM_NO_DIA = re.compile(r"essa linha não tem viagens", re.I)
 # pop-up "Passagens com benefícios": "Id Jovem (50%)  2 disponíveis, 0 ocupado"
 BENEFICIO = re.compile(r"id\s*jovem\s*\((100|50)\s*%\)\s*(\d+)\s*dispon", re.I)
 MAX_VIAGENS = 12  # máximo de horários clicados por dia
@@ -368,13 +371,39 @@ def cat_abrir(page, u):
     page.wait_for_timeout(1500)
 
 
-def cat_botoes(page):
-    """Botões de tarifa (linha com preço e seta laranja) de cada viagem da lista."""
-    for seletor in ("button:has-text('R$')", "[role=button]:has-text('R$')", "a:has-text('R$')"):
-        loc = page.locator(seletor)
-        if loc.count():
-            return loc
-    return page.locator("text=/R\\$\\s*\\d/")
+CAT_SELETORES = ("button:has-text('R$')", "[role=button]:has-text('R$')", "a:has-text('R$')",
+                 "[class*=fare]:has-text('R$')", "[class*=price]:has-text('R$')", "text=/R\\$\\s*\\d/")
+
+
+def cat_contagens(page):
+    """Quantos elementos cada seletor encontra (serve para calibrar)."""
+    out = {}
+    for sel in CAT_SELETORES:
+        try:
+            out[sel] = page.locator(sel).count()
+        except Exception:
+            out[sel] = -1
+    return out
+
+
+def cat_abrir_popup(page, u, j, recarregar):
+    """Clica na j-ésima tarifa (testando os seletores na ordem) até abrir o pop-up de benefícios.
+    Devolve o texto da página com o pop-up, ou None."""
+    for sel in CAT_SELETORES:
+        if recarregar:
+            cat_abrir(page, u)
+        recarregar = True  # nas tentativas seguintes, recarrega a lista antes de clicar
+        loc = page.locator(sel)
+        if loc.count() <= j:
+            continue
+        try:
+            loc.nth(j).click(timeout=6000)
+            page.wait_for_selector("text=/Passagens com benef/i", timeout=6000)
+        except Exception:
+            continue
+        page.wait_for_timeout(500)
+        return page.inner_text("body")
+    return None
 
 
 def varrer_catedral(nav, hoje, resumo):
@@ -398,8 +427,10 @@ def varrer_catedral(nav, hoje, resumo):
                 pass
         page.on("response", captura)
 
+    amostras = 0  # no debug, guarda prints só de dias que têm resultado (até 4)
+    mapa = {}     # rota -> datas em que a Catedral mostra viagens com gratuidade (para entender o padrão)
     for o, d in CAT_ROTAS:
-        for i in range(DIAS):
+        for i in range(max(DIAS, 60) if DEBUG else DIAS):
             dia = hoje + dt.timedelta(days=i)
             if not DEBUG and dia.weekday() not in (DIAS_IDA if (o, d) in IDA else DIAS_VOLTA):
                 continue
@@ -407,37 +438,39 @@ def varrer_catedral(nav, hoje, resumo):
             u = cat_url(o, d, data)
             rota = f"CATEDRAL {SIGLAS[o]}>{SIGLAS[d]} {data}: "
             nome = f"debug/catedral-{SIGLAS[o]}-{SIGLAS[d]}-{data}"
-            amostra = DEBUG and i < 3
             try:
                 cat_abrir(page, u)
                 paginas += 1
                 texto = page.inner_text("body")
-                if amostra:
-                    open(nome + ".txt", "w").write(texto)
-                    open(nome + ".html", "w").write(page.content()[:400000])
-                    page.screenshot(path=nome + ".png", full_page=True)
                 if SEM_GRATUIDADE.search(texto):
+                    if DEBUG and i == 0:  # uma amostra de "sem gratuidade"
+                        open(nome + ".txt", "w").write(texto)
                     resumo.append(rota + "nada (sem gratuidades)")
                     continue
-                n = min(cat_botoes(page).count(), MAX_VIAGENS)
+                if SEM_VIAGEM_NO_DIA.search(texto):
+                    resumo.append(rota + "linha sem viagens nesse dia (o site mostra outra data: ignorado)")
+                    continue
+                mapa.setdefault((o, d), []).append(data)
+                amostra = DEBUG and amostras < 4
+                contagens = cat_contagens(page)
+                if amostra:
+                    amostras += 1
+                    open(nome + ".txt", "w").write(texto)
+                    open(nome + ".html", "w").write(page.content()[:600000])
+                    page.screenshot(path=nome + ".png", full_page=True)
+                    open(nome + "-seletores.txt", "w").write(json.dumps(contagens, indent=1))
+                n = min(max(contagens.values()), MAX_VIAGENS) if contagens else 0
                 tipos, abriu = {}, 0
                 for j in range(n):
-                    if j:  # a partir da 2ª viagem recarrega a lista
-                        cat_abrir(page, u)
+                    popup = cat_abrir_popup(page, u, j, recarregar=bool(j))
+                    if j:
                         paginas += 1
-                    botoes = cat_botoes(page)
-                    if botoes.count() <= j:
-                        break
-                    botoes.nth(j).click(timeout=8000)
-                    try:
-                        page.wait_for_selector("text=/Passagens com benef/i", timeout=8000)
-                    except Exception:
+                    if popup is None:
                         continue  # esta viagem não abriu pop-up de benefícios
                     abriu += 1
-                    page.wait_for_timeout(500)
-                    popup = page.inner_text("body")
                     if amostra:
                         open(f"{nome}-popup{j}.txt", "w").write(popup)
+                        open(f"{nome}-popup{j}.html", "w").write(page.content()[:600000])
                         page.screenshot(path=f"{nome}-popup{j}.png")
                     for t, v in cat_tipos(popup).items():
                         tipos[t] = max(v, tipos.get(t, 0))
@@ -448,14 +481,25 @@ def varrer_catedral(nav, hoje, resumo):
                     det = ", ".join(f"{t}% ({v} vagas)" for t, v in sorted(tipos.items(), key=lambda x: -int(x[0])))
                     resumo.append(rota + f"ACHEI ({det})")
                 elif n == 0:
-                    resumo.append(rota + "SEM botões de tarifa reconhecidos (página diferente do esperado?)")
+                    resumo.append(rota + f"SEM botões de tarifa reconhecidos {contagens}")
                 elif abriu == 0:
-                    resumo.append(rota + f"{n} viagem(ns), mas o pop-up de benefícios NÃO abriu")
+                    resumo.append(rota + f"{n} viagem(ns), mas o pop-up de benefícios NÃO abriu {contagens}")
                 else:
                     resumo.append(rota + f"{abriu} pop-up(s) lido(s), sem Id Jovem com vaga")
             except Exception as e:
                 print("Erro Catedral", o, d, data, str(e)[:150])
                 resumo.append(rota + f"ERRO ({str(e)[:120]})")
+    if DEBUG:  # mapa: em que dias a Catedral oferece alguma gratuidade
+        for (o, d), datas in mapa.items():
+            por_dia = {}
+            for x in datas:
+                dd = dt.date.fromisoformat(x)
+                por_dia[SEMANA[dd.weekday()]] = por_dia.get(SEMANA[dd.weekday()], 0) + 1
+            lista = ", ".join(f"{SEMANA[dt.date.fromisoformat(x).weekday()]} {x[8:]}/{x[5:7]}" for x in datas)
+            resumo.append(f"MAPA CATEDRAL {SIGLAS[o]}>{SIGLAS[d]}: {len(datas)} dia(s) com gratuidade "
+                          f"por dia da semana {por_dia} -> {lista or 'nenhum'}")
+        if not mapa:
+            resumo.append("MAPA CATEDRAL: nenhum dia com gratuidade nos dias consultados")
     page.context.close()
     return achados, paginas
 
