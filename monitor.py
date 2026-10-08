@@ -20,13 +20,14 @@ ROTAS = IDA + [(d, o) for o, d in IDA]  # ida e volta de cada rota
 
 DIAS = int(os.getenv("DIAS", "60"))                  # quantos dias à frente pesquisar
 PASSAGEIROS = os.getenv("PASSAGEIROS", "").strip()   # ex.: 3:1  (código do Jovem)
+CATEDRAL = os.getenv("CATEDRAL", "1") != "0"        # coloque CATEDRAL=0 para desligar a Catedral
 DEBUG = os.getenv("DEBUG") == "1"
 TESTE = os.getenv("TESTE") == "1"
 RESUMO = os.getenv("RESUMO") == "1"   # manda TUDO que está disponível agora, mesmo o que já foi avisado
 ESTADO = "estado.json"
 
 # Dias da semana que interessam (segunda=0, terça=1, quarta=2, quinta=3, sexta=4, sábado=5, domingo=6)
-DIAS_IDA = {3, 4, 5}    # ida (saindo de JP ou CG): quinta, sexta e sábado
+DIAS_IDA = {3, 4, 5}       # ida (saindo de JP ou CG): quinta, sexta e sábado
 DIAS_VOLTA_AVISO = {6, 0}  # volta (saindo de FOR ou JDN) que gera aviso normal: domingo e segunda
 DIAS_VOLTA = {5, 6, 0}     # volta que o robô consulta: inclui sábado, usado só nas combinações ida+volta
 
@@ -156,6 +157,16 @@ def url(o, d, data):
             f"&passengers={PASSAGEIROS}")
 
 
+def mkchave(o, d, data, tipo, emp="G"):
+    """Chave de uma passagem encontrada. Guanabara (G) mantém o formato antigo; Catedral (C) leva um 5º campo."""
+    return f"{o}>{d}>{data}>{tipo}" + ("" if emp == "G" else f">{emp}")
+
+
+def partes(k):
+    p = k.split(">")
+    return p[0], p[1], p[2], p[3], (p[4] if len(p) > 4 else "G")
+
+
 def pascoa(ano):
     """Data da Páscoa (algoritmo gregoriano) - base para Carnaval, Sexta Santa e Corpus Christi."""
     a, b, c = ano % 19, ano // 100, ano % 100
@@ -236,15 +247,17 @@ def montar(novos, tipo):
     indicando ida ou volta e o dia da semana de cada data. 🏖️ marca feriadão."""
     grupos = {}
     for k in novos:
-        o, d, data, t = k.split(">")
+        o, d, data, t, emp = partes(k)
         if t == tipo:
-            grupos.setdefault((o, d), []).append(data)
+            grupos.setdefault((o, d, emp), []).append(data)
     usados, linhas = set(), []
     for o, d in ROTAS:
-        if (o, d) in grupos:
-            sentido = "IDA" if (o, d) in IDA else "VOLTA"
-            datas = ", ".join(rotulo_data(x, usados) for x in sorted(grupos[(o, d)]))
-            linhas.append(f"{sentido} {SIGLAS[o]} → {SIGLAS[d]}: {datas}")
+        for emp in ("G", "C"):
+            if (o, d, emp) in grupos:
+                sentido = "IDA" if (o, d) in IDA else "VOLTA"
+                empresa = " (Catedral)" if emp == "C" else ""
+                datas = ", ".join(rotulo_data(x, usados) for x in sorted(grupos[(o, d, emp)]))
+                linhas.append(f"{sentido} {SIGLAS[o]} → {SIGLAS[d]}{empresa}: {datas}")
     r = rodape(usados)
     return "\n".join(linhas) + ("\n\n" + r if r else "")
 
@@ -255,17 +268,18 @@ def montar(novos, tipo):
 COMBOS = [(3, 3), (4, 2), (3, 2)]
 
 
-def avisavel(chave):
+def avisavel(k):
     """Aviso normal só para os dias de interesse (volta de sábado serve apenas às combinações)."""
-    o, d, data, _ = chave.split(">")
+    o, d, data, _, _ = partes(k)
     return dt.date.fromisoformat(data).weekday() in (DIAS_IDA if (o, d) in IDA else DIAS_VOLTA_AVISO)
 
 
 def melhor(achados, o, d, data):
-    """'100' se houver passagem 100% grátis nessa rota/data; senão '50'; senão None."""
+    """(tipo, empresa) da melhor passagem nessa rota/data: 100% antes de 50%; Guanabara antes da Catedral."""
     for t in ("100", "50"):
-        if f"{o}>{d}>{data}>{t}" in achados:
-            return t
+        for emp in ("G", "C"):
+            if mkchave(o, d, data, t, emp) in achados:
+                return t, emp
     return None
 
 
@@ -273,25 +287,40 @@ def achar_pares(achados):
     """Ida numa rota + volta na rota inversa, ambas disponíveis (100% ou 50%)."""
     pares = {}
     for o, d in IDA:
-        datas = {k.split(">")[2] for k in achados if k.startswith(f"{o}>{d}>")}
+        # a volta sai de d para qualquer cidade que também vá até d (ex.: ida CG→FOR, volta FOR→JP ou FOR→CG)
+        destinos_volta = [x for x, d2 in IDA if d2 == d]
+        datas = {partes(k)[2] for k in achados if k.startswith(f"{o}>{d}>")}
         for data in sorted(datas):
             dia = dt.date.fromisoformat(data)
+            a = melhor(achados, o, d, data)
+            if not a:
+                continue
             for dia_ida, depois in COMBOS:
                 if dia.weekday() != dia_ida:
                     continue
                 volta = (dia + dt.timedelta(days=depois)).isoformat()
-                a, b = melhor(achados, o, d, data), melhor(achados, d, o, volta)
-                if a and b:
-                    pares[f"par|{o}>{d}|{data}|{volta}|{a}+{b}"] = (o, d, data, volta, a, b)
+                for x in destinos_volta:
+                    b = melhor(achados, d, x, volta)
+                    if not b:
+                        continue
+                    sa, sb = a[0] + ("" if a[1] == "G" else a[1]), b[0] + ("" if b[1] == "G" else b[1])
+                    rota = f"{o}>{d}" if x == o else f"{o}>{d}>{x}"  # mesma rota mantém a chave antiga
+                    pares[f"par|{rota}|{data}|{volta}|{sa}+{sb}"] = (o, d, data, volta, a, b, x)
     return pares
 
 
 def montar_pares(pares):
     grupos = {"100": [], "misto": [], "50": []}
     usados = set()
-    for k, (o, d, ida, volta, a, b) in sorted(pares.items(), key=lambda kv: (kv[1][2], kv[0])):
-        linha = (f"{SIGLAS[o]} ⇄ {SIGLAS[d]}: ida {rotulo_data(ida, usados)} → "
-                 f"volta {rotulo_data(volta, usados)}")
+    for k, (o, d, ida, volta, (a, ea), (b, eb), x) in sorted(pares.items(), key=lambda kv: (kv[1][2], kv[0])):
+        ci = ' (Catedral)' if ea == 'C' else ''
+        cv = ' (Catedral)' if eb == 'C' else ''
+        if x == o:
+            linha = (f"{SIGLAS[o]} ⇄ {SIGLAS[d]}: ida {rotulo_data(ida, usados)}{ci} → "
+                     f"volta {rotulo_data(volta, usados)}{cv}")
+        else:  # volta por outra cidade de origem
+            linha = (f"IDA {SIGLAS[o]} → {SIGLAS[d]} {rotulo_data(ida, usados)}{ci} + "
+                     f"VOLTA {SIGLAS[d]} → {SIGLAS[x]} {rotulo_data(volta, usados)}{cv}")
         if a == b:
             grupos[a].append(linha)
         else:
@@ -300,11 +329,135 @@ def montar_pares(pares):
     if grupos["100"]:
         blocos.append("🏆 IDA E VOLTA 100% GRÁTIS\n" + "\n".join(grupos["100"]))
     if grupos["misto"]:
-        blocos.append("🥇 UMA PERNA GRÁTIS + OUTRA COM 50%\n" + "\n".join(grupos["misto"]))
+        blocos.append("🥇 UMA GRÁTIS + OUTRA COM 50%\n" + "\n".join(grupos["misto"]))
     if grupos["50"]:
         blocos.append("🥈 IDA E VOLTA COM 50%\n" + "\n".join(grupos["50"]))
     r = rodape(usados)
     return "\n\n".join(blocos) + ("\n\n" + r if r else "")
+
+
+# ---------------------------------------------------------------- Catedral (ClickBus)
+CAT_BASE = "https://catedral.clickbus.com.br/onibus"
+CAT_SLUGS = {"João Pessoa": "joao-pessoa-pb", "Fortaleza": "fortaleza-ce"}
+CAT_ROTAS = [("João Pessoa", "Fortaleza"), ("Fortaleza", "João Pessoa")]  # a Catedral só opera esta rota
+SEM_GRATUIDADE = re.compile(r"não há gratuidades", re.I)
+# pop-up "Passagens com benefícios": "Id Jovem (50%)  2 disponíveis, 0 ocupado"
+BENEFICIO = re.compile(r"id\s*jovem\s*\((100|50)\s*%\)\s*(\d+)\s*dispon", re.I)
+MAX_VIAGENS = 12  # máximo de horários clicados por dia
+
+
+def cat_url(o, d, data):
+    return f"{CAT_BASE}/{CAT_SLUGS[o]}/{CAT_SLUGS[d]}?departureDate={data}&gratuity=true"
+
+
+def cat_tipos(texto):
+    """{'100': vagas, '50': vagas} lido do pop-up; só entra o que tem pelo menos 1 vaga."""
+    tipos = {}
+    for t, n in BENEFICIO.findall(texto):
+        if int(n) > 0:
+            tipos[t] = max(int(n), tipos.get(t, 0))
+    return tipos
+
+
+def cat_abrir(page, u):
+    page.goto(u, wait_until="domcontentloaded", timeout=45000)
+    try:
+        page.wait_for_load_state("networkidle", timeout=8000)
+    except Exception:
+        pass
+    page.wait_for_timeout(1500)
+
+
+def cat_botoes(page):
+    """Botões de tarifa (linha com preço e seta laranja) de cada viagem da lista."""
+    for seletor in ("button:has-text('R$')", "[role=button]:has-text('R$')", "a:has-text('R$')"):
+        loc = page.locator(seletor)
+        if loc.count():
+            return loc
+    return page.locator("text=/R\\$\\s*\\d/")
+
+
+def varrer_catedral(nav, hoje, resumo):
+    """Devolve ({chave: url}, páginas). A busca já vem filtrada (gratuity=true); para cada
+    viagem clica na tarifa e lê o pop-up de benefícios, procurando Id Jovem com vagas."""
+    achados, paginas = {}, 0
+    page = nav.new_context(locale="pt-BR", viewport={"width": 1280, "height": 900}).new_page()
+    page.route("**/*", lambda r: r.abort()
+               if r.request.resource_type in ("image", "media", "font") else r.continue_())
+    if DEBUG:  # guarda respostas JSON que falem de Jovem/gratuidade: pode haver um jeito mais rápido de ler
+        cont = [0]
+
+        def captura(resp):
+            try:
+                if cont[0] < 15 and "json" in (resp.headers.get("content-type") or ""):
+                    corpo = resp.text()
+                    if re.search(r"jovem|gratuity|benefit", corpo, re.I):
+                        cont[0] += 1
+                        open(f"debug/catedral-json-{cont[0]}.txt", "w").write(resp.url + "\n\n" + corpo[:200000])
+            except Exception:
+                pass
+        page.on("response", captura)
+
+    for o, d in CAT_ROTAS:
+        for i in range(DIAS):
+            dia = hoje + dt.timedelta(days=i)
+            if not DEBUG and dia.weekday() not in (DIAS_IDA if (o, d) in IDA else DIAS_VOLTA):
+                continue
+            data, u = dia.isoformat(), None
+            u = cat_url(o, d, data)
+            rota = f"CATEDRAL {SIGLAS[o]}>{SIGLAS[d]} {data}: "
+            nome = f"debug/catedral-{SIGLAS[o]}-{SIGLAS[d]}-{data}"
+            amostra = DEBUG and i < 3
+            try:
+                cat_abrir(page, u)
+                paginas += 1
+                texto = page.inner_text("body")
+                if amostra:
+                    open(nome + ".txt", "w").write(texto)
+                    open(nome + ".html", "w").write(page.content()[:400000])
+                    page.screenshot(path=nome + ".png", full_page=True)
+                if SEM_GRATUIDADE.search(texto):
+                    resumo.append(rota + "nada (sem gratuidades)")
+                    continue
+                n = min(cat_botoes(page).count(), MAX_VIAGENS)
+                tipos, abriu = {}, 0
+                for j in range(n):
+                    if j:  # a partir da 2ª viagem recarrega a lista
+                        cat_abrir(page, u)
+                        paginas += 1
+                    botoes = cat_botoes(page)
+                    if botoes.count() <= j:
+                        break
+                    botoes.nth(j).click(timeout=8000)
+                    try:
+                        page.wait_for_selector("text=/Passagens com benef/i", timeout=8000)
+                    except Exception:
+                        continue  # esta viagem não abriu pop-up de benefícios
+                    abriu += 1
+                    page.wait_for_timeout(500)
+                    popup = page.inner_text("body")
+                    if amostra:
+                        open(f"{nome}-popup{j}.txt", "w").write(popup)
+                        page.screenshot(path=f"{nome}-popup{j}.png")
+                    for t, v in cat_tipos(popup).items():
+                        tipos[t] = max(v, tipos.get(t, 0))
+                for t, v in tipos.items():
+                    achados[mkchave(o, d, data, t, "C")] = u
+                    print(f"ACHEI (Catedral): {o} > {d} {data} ID Jovem {t}% ({v} vagas)")
+                if tipos:
+                    det = ", ".join(f"{t}% ({v} vagas)" for t, v in sorted(tipos.items(), key=lambda x: -int(x[0])))
+                    resumo.append(rota + f"ACHEI ({det})")
+                elif n == 0:
+                    resumo.append(rota + "SEM botões de tarifa reconhecidos (página diferente do esperado?)")
+                elif abriu == 0:
+                    resumo.append(rota + f"{n} viagem(ns), mas o pop-up de benefícios NÃO abriu")
+                else:
+                    resumo.append(rota + f"{abriu} pop-up(s) lido(s), sem Id Jovem com vaga")
+            except Exception as e:
+                print("Erro Catedral", o, d, data, str(e)[:150])
+                resumo.append(rota + f"ERRO ({str(e)[:120]})")
+    page.context.close()
+    return achados, paginas
 
 
 def main():
@@ -368,6 +521,13 @@ def main():
                         resumo.append(rota + "nada (nenhum resultado encontrado)")
                     else:
                         resumo.append(rota + "TEM VIAGENS, mas sem preço de ID Jovem reconhecido")
+        if CATEDRAL:  # etapa isolada: se falhar, a Guanabara segue normal
+            try:
+                ach_c, pag_c = varrer_catedral(nav, hoje, resumo)
+                achados.update(ach_c)
+                paginas += pag_c
+            except Exception as e:
+                print("Catedral falhou (a Guanabara segue normal):", e)
         nav.close()
     seg = time.time() - inicio
     print(f"Tempo: {seg:.0f}s para {paginas} páginas ({seg / max(paginas, 1):.1f}s por página)")
@@ -384,15 +544,15 @@ def main():
     novos_pares = pares if RESUMO else {k: v for k, v in pares.items() if k not in antigo}
     enviados_pares = set()
     if novos_pares:
-        prio = 5 if any("100" in (v[4], v[5]) for v in novos_pares.values()) else 4
+        prio = 5 if any("100" in (v[4][0], v[5][0]) for v in novos_pares.values()) else 4
         titulo = ("📋 RESUMO DO DIA: " if RESUMO else "") + "⭐ IDA E VOLTA DISPONÍVEL"
         if avisar(titulo, montar_pares(novos_pares), link=None, prioridade=prio):
             enviados_pares.update(novos_pares)
     # 100% primeiro (aviso forte); depois os 50% (aviso normal)
     for tipo, titulo, prio in (("100", "🎉 ID JOVEM 100% GRÁTIS", 5),
                                ("50", "🚌 ID Jovem 50% de desconto", 3)):
-        chaves = sorted((k for k in novos if k.endswith(">" + tipo)),
-                        key=lambda k: (k.split(">")[2], k))
+        chaves = sorted((k for k in novos if partes(k)[3] == tipo),
+                        key=lambda k: (partes(k)[2], k))
         if not chaves:
             continue
         texto = montar(novos, tipo)
