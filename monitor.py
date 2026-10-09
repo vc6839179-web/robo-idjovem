@@ -26,7 +26,8 @@ RESUMO = os.getenv("RESUMO") == "1"   # manda TUDO que está disponível agora, 
 ESTADO = "estado.json"
 
 # Dias da semana que interessam (segunda=0, terça=1, quarta=2, quinta=3, sexta=4, sábado=5, domingo=6)
-DIAS_IDA = {3, 4, 5}       # ida (saindo de JP ou CG): quinta, sexta e sábado
+DIAS_IDA = {3, 4}          # ida (saindo de JP ou CG): quinta e sexta, sempre
+# A ida de SÁBADO só vale se a segunda-feira seguinte for feriado nacional (ver ida_vale).
 DIAS_VOLTA_AVISO = {6, 0}  # volta (saindo de FOR ou JDN) que gera aviso normal: domingo e segunda
 DIAS_VOLTA = {5, 6, 0}     # volta que o robô consulta: inclui sábado, usado só nas combinações ida+volta
 
@@ -193,6 +194,16 @@ def feriadao(data):
     return None
 
 
+def ida_vale(dia):
+    """Ida (data como dt.date) de quinta e sexta vale sempre; a de sábado só se a segunda seguinte for feriado."""
+    if dia.weekday() in DIAS_IDA:
+        return True
+    if dia.weekday() == 5:
+        seg = dia + dt.timedelta(days=2)
+        return seg in feriados(seg.year)
+    return False
+
+
 def rotulo_data(data, usados=None, extra=""):
     d = dt.date.fromisoformat(data)
     txt = f"{SEMANA[d.weekday()]} {d.day:02d}/{d.month:02d}{extra}"
@@ -236,8 +247,10 @@ COMBOS = [(3, 3), (4, 2), (3, 2)]
 def avisavel(k):
     """Aviso normal só para os dias de interesse (volta de sábado serve apenas às combinações)."""
     o, d, data, _ = partes(k)
-    dia = dt.date.fromisoformat(data).weekday()
-    return dia in (DIAS_IDA if (o, d) in IDA else DIAS_VOLTA_AVISO)
+    dia = dt.date.fromisoformat(data)
+    if (o, d) in IDA:
+        return ida_vale(dia)
+    return dia.weekday() in DIAS_VOLTA_AVISO
 
 
 def melhor(achados, o, d, data):
@@ -291,7 +304,7 @@ def montar_pares(pares):
     if grupos["100"]:
         blocos.append("🏆 IDA E VOLTA 100% GRÁTIS\n" + "\n".join(grupos["100"]))
     if grupos["misto"]:
-        blocos.append("🥇 UMA GRÁTIS + OUTRA COM 50%\n" + "\n".join(grupos["misto"]))
+        blocos.append("🥇 UMA PERNA GRÁTIS + OUTRA COM 50%\n" + "\n".join(grupos["misto"]))
     if grupos["50"]:
         blocos.append("🥈 IDA E VOLTA COM 50%\n" + "\n".join(grupos["50"]))
     r = rodape(usados)
@@ -324,7 +337,7 @@ def main():
             for i in range(DIAS):
                 dia = hoje + dt.timedelta(days=i)
                 # no debug olha todos os dias (para testar as 6 rotas); no normal só os dias que interessam
-                if not DEBUG and dia.weekday() not in (DIAS_IDA if (o, d) in IDA else DIAS_VOLTA):
+                if not DEBUG and not (ida_vale(dia) if (o, d) in IDA else dia.weekday() in DIAS_VOLTA):
                     continue
                 data = dia.isoformat()
                 u = url(o, d, data)
