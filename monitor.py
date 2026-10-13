@@ -304,7 +304,7 @@ def montar_pares(pares):
     if grupos["100"]:
         blocos.append("🏆 IDA E VOLTA 100% GRÁTIS\n" + "\n".join(grupos["100"]))
     if grupos["misto"]:
-        blocos.append("🥇 UMA PERNA GRÁTIS + OUTRA COM 50%\n" + "\n".join(grupos["misto"]))
+        blocos.append("🥇 UMA GRÁTIS + OUTRA COM 50%\n" + "\n".join(grupos["misto"]))
     if grupos["50"]:
         blocos.append("🥈 IDA E VOLTA COM 50%\n" + "\n".join(grupos["50"]))
     r = rodape(usados)
