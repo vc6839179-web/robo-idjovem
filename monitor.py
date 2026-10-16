@@ -25,11 +25,15 @@ TESTE = os.getenv("TESTE") == "1"
 RESUMO = os.getenv("RESUMO") == "1"   # manda TUDO que está disponível agora, mesmo o que já foi avisado
 ESTADO = "estado.json"
 
-# Dias da semana que interessam (segunda=0, terça=1, quarta=2, quinta=3, sexta=4, sábado=5, domingo=6)
-DIAS_IDA = {3, 4}          # ida (saindo de JP ou CG): quinta e sexta, sempre
+# Dias da semana (segunda=0, terça=1, quarta=2, quinta=3, sexta=4, sábado=5, domingo=6)
+DIAS_IDA = {3, 4}   # ida (saindo de JP ou CG): quinta e sexta, sempre
 # A ida de SÁBADO só vale se a segunda-feira seguinte for feriado nacional (ver ida_vale).
-DIAS_VOLTA_AVISO = {6, 0}  # volta (saindo de FOR ou JDN) que gera aviso normal: domingo e segunda
-DIAS_VOLTA = {5, 6, 0}     # volta que o robô consulta: inclui sábado, usado só nas combinações ida+volta
+#
+# VOLTA (saindo de FOR ou JDN):
+#   - domingo: sempre avisa
+#   - segunda: SÓ se for feriado (senão não consulta nem avisa)
+#   - terça: SÓ se a segunda anterior foi feriado
+#   - sábado: consultado apenas para as combinações ida+volta (quinta -> sábado)
 
 # O texto "ID Jovem" NÃO aparece na página. Com "1 jovem" na busca, a passagem vem com a
 # etiqueta "Desconto", o preço cheio e, em seguida, o preço com ~50% de desconto.
@@ -204,6 +208,26 @@ def ida_vale(dia):
     return False
 
 
+def volta_feriado(dia):
+    """True se for uma segunda que é feriado, ou uma terça cuja segunda anterior é feriado."""
+    if dia.weekday() == 0:
+        return dia in feriados(dia.year)
+    if dia.weekday() == 1:
+        seg = dia - dt.timedelta(days=1)
+        return seg in feriados(seg.year)
+    return False
+
+
+def volta_vale(dia):
+    """Volta que gera aviso normal: domingo sempre; segunda/terça só no feriadão."""
+    return dia.weekday() == 6 or volta_feriado(dia)
+
+
+def volta_consulta(dia):
+    """Volta que o robô consulta: sábado (só p/ combinações), domingo e segunda/terça de feriadão."""
+    return dia.weekday() in (5, 6) or volta_feriado(dia)
+
+
 def rotulo_data(data, usados=None, extra=""):
     d = dt.date.fromisoformat(data)
     txt = f"{SEMANA[d.weekday()]} {d.day:02d}/{d.month:02d}{extra}"
@@ -238,10 +262,23 @@ def montar(novos, tipo):
     return "\n".join(linhas) + ("\n\n" + r if r else "")
 
 
-# (dia da semana da IDA, dias até a VOLTA): quinta -> domingo (3, 3), sexta -> domingo (4, 2)
-# e quinta -> sábado (3, 2). Para outras combinações, acrescente pares, ex.: (5, 1) = sábado -> domingo.
-# Obs.: a volta precisa estar em DIAS_VOLTA (acima) para ser consultada.
-COMBOS = [(3, 3), (4, 2), (3, 2)]
+# COMBINAÇÕES IDA + VOLTA (dia da semana da IDA, dias até a VOLTA):
+#   quinta -> domingo (3, 3)  <- PRIORIDADE 1
+#   quinta -> sábado  (3, 2)
+#   sexta  -> domingo (4, 2)
+COMBOS = [(3, 3), (3, 2), (4, 2)]
+
+# Combinações que só valem quando a volta cai numa segunda FERIADO ou numa terça depois de segunda feriado:
+#   quinta->seg, sexta->seg, sábado->seg, quinta->ter, sexta->ter, sábado->ter
+COMBOS_FERIADO = [(3, 4), (4, 3), (5, 2), (3, 5), (4, 4), (5, 3)]
+
+
+def ordem_par(ida, volta):
+    """Ordem de prioridade no aviso: 0 = quinta->domingo (prioridade 1), 1 = quinta->sábado,
+    2 = sexta->domingo, 3 = combinações de feriadão."""
+    di = dt.date.fromisoformat(ida).weekday()
+    dv = dt.date.fromisoformat(volta).weekday()
+    return {(3, 6): 0, (3, 5): 1, (4, 6): 2}.get((di, dv), 3)
 
 
 def avisavel(k):
@@ -250,7 +287,7 @@ def avisavel(k):
     dia = dt.date.fromisoformat(data)
     if (o, d) in IDA:
         return ida_vale(dia)
-    return dia.weekday() in DIAS_VOLTA_AVISO
+    return volta_vale(dia)
 
 
 def melhor(achados, o, d, data):
@@ -273,10 +310,13 @@ def achar_pares(achados):
             a = melhor(achados, o, d, data)
             if not a:
                 continue
-            for dia_ida, depois in COMBOS:
+            for dia_ida, depois in COMBOS + COMBOS_FERIADO:
                 if dia.weekday() != dia_ida:
                     continue
-                volta = (dia + dt.timedelta(days=depois)).isoformat()
+                volta_dt = dia + dt.timedelta(days=depois)
+                if (dia_ida, depois) in COMBOS_FERIADO and not volta_feriado(volta_dt):
+                    continue
+                volta = volta_dt.isoformat()
                 for x in destinos_volta:
                     b = melhor(achados, d, x, volta)
                     if not b:
@@ -289,12 +329,15 @@ def achar_pares(achados):
 def montar_pares(pares):
     grupos = {"100": [], "misto": [], "50": []}
     usados = set()
-    for k, (o, d, ida, volta, a, b, x) in sorted(pares.items(), key=lambda kv: (kv[1][2], kv[0])):
+    ordenados = sorted(pares.items(),
+                       key=lambda kv: (ordem_par(kv[1][2], kv[1][3]), kv[1][2], kv[0]))
+    for k, (o, d, ida, volta, a, b, x) in ordenados:
+        marca = "🔝 " if ordem_par(ida, volta) == 0 else ""  # quinta -> domingo
         if x == o:
-            linha = (f"{SIGLAS[o]} ⇄ {SIGLAS[d]}: ida {rotulo_data(ida, usados, valor(o, d, ida, a))} → "
+            linha = (f"{marca}{SIGLAS[o]} ⇄ {SIGLAS[d]}: ida {rotulo_data(ida, usados, valor(o, d, ida, a))} → "
                      f"volta {rotulo_data(volta, usados, valor(d, x, volta, b))}")
         else:  # volta por outra cidade de origem
-            linha = (f"IDA {SIGLAS[o]} → {SIGLAS[d]} {rotulo_data(ida, usados, valor(o, d, ida, a))} + "
+            linha = (f"{marca}IDA {SIGLAS[o]} → {SIGLAS[d]} {rotulo_data(ida, usados, valor(o, d, ida, a))} + "
                      f"VOLTA {SIGLAS[d]} → {SIGLAS[x]} {rotulo_data(volta, usados, valor(d, x, volta, b))}")
         if a == b:
             grupos[a].append(linha)
@@ -337,7 +380,7 @@ def main():
             for i in range(DIAS):
                 dia = hoje + dt.timedelta(days=i)
                 # no debug olha todos os dias (para testar as 6 rotas); no normal só os dias que interessam
-                if not DEBUG and not (ida_vale(dia) if (o, d) in IDA else dia.weekday() in DIAS_VOLTA):
+                if not DEBUG and not (ida_vale(dia) if (o, d) in IDA else volta_consulta(dia)):
                     continue
                 data = dia.isoformat()
                 u = url(o, d, data)
@@ -384,12 +427,15 @@ def main():
 
     novos = {k: v for k, v in achados.items() if avisavel(k) and (RESUMO or k not in antigo)}
     enviados = set()
-    # destaque: ida (quinta) + volta (domingo) disponíveis -> vai ANTES dos avisos normais, que continuam
+    # destaque: ida + volta disponíveis -> vai ANTES dos avisos normais, que continuam
     pares = achar_pares(achados)
     novos_pares = pares if RESUMO else {k: v for k, v in pares.items() if k not in antigo}
     enviados_pares = set()
     if novos_pares:
-        prio = 5 if any("100" in (v[4], v[5]) for v in novos_pares.values()) else 4
+        # prioridade máxima se houver 100% grátis ou combinação quinta -> domingo
+        forte = any("100" in (v[4], v[5]) or ordem_par(v[2], v[3]) == 0
+                    for v in novos_pares.values())
+        prio = 5 if forte else 4
         titulo = ("📋 RESUMO DO DIA: " if RESUMO else "") + "⭐ IDA E VOLTA DISPONÍVEL"
         if avisar(titulo, montar_pares(novos_pares), link=None, prioridade=prio):
             enviados_pares.update(novos_pares)
